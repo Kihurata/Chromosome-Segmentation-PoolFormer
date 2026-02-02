@@ -1,0 +1,13 @@
+stage: stage3_sep
+experiment_name: separation_gan_v1
+training:
+  data_root: "D:\\Code\\NCKH\\data\\stage3_separation"
+  save_dir: "experiments"
+  epochs: 200
+  batch_size: 1
+  lr: 2.0e-4
+
+model:
+  type: pix2pix # or cyclegan, or custom separation model
+  input_channels: 3 # Overlapping image
+  output_channels: 3 # Separated image (or 6 for two outputs)

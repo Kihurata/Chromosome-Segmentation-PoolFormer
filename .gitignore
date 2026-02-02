@@ -1,0 +1,25 @@
+# --- Các thư mục nặng (Cần chặn) ---
+data/
+data_raw/
+experiments/
+mmdet_env/
+venv/
+env/
+__pycache__/
+work_dirs/
+
+# --- Các file nặng ---
+*.pth
+*.pt
+*.pkl
+*.zip
+*.tar.gz
+*.rar
+
+# --- Hệ thống ---
+.DS_Store
+.vscode/
+.idea/
+
+# --- Giữ lại cấu trúc thư mục rỗng ---
+!**/.gitkeep

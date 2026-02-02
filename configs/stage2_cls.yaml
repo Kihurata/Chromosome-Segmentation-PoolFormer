@@ -1,0 +1,30 @@
+stage: stage2_cls
+experiment_name: poolformer_m36_cls
+training:
+  data_root: "D:\\Code\\NCKH\\data\\stage2_classification\\classification_balanced" # Update this if needed to point to actual data location, user said "data/stage2_classification"
+  save_dir: "experiments"
+  work_dir: "experiments/stage2_cls" # Legacy support if code uses it
+  resume: true
+  epochs: 100
+  batch_size: 8
+  num_workers: 4
+  base_lr: 2.0e-4
+  weight_decay: 0.05
+  val_interval: 2
+  ckpt_interval: 5
+  seed: 42
+
+model:
+  type: mmpretrain.ImageClassifier
+  arch: m36
+  num_classes: 3
+  classes: ['single', 'overlapping', 'touching']
+  input_size: 320
+  pretrain_weights: "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
+
+augmentation:
+  mixup_alpha: 0.8
+  cutmix_alpha: 1.0
+  random_erase_prob: 0.25
+  random_rotate_angle: [-180, 180]
+  color_jitter: [0.15, 0.15, 0.15, 0.02]
