@@ -2,21 +2,33 @@ stage: stage1_seg
 experiment_name: poolformer_m36_seg
 training:
   data_root: "D:\\Code\\NCKH\\data\\stage1_segmentation"
-  save_dir: "experiments\\stage1_seg"
+  save_dir: "experiments"
   epochs: 50
   batch_size: 4
   num_workers: 4
   lr: 2.0e-4
   wd: 0.05
   val_interval: 1
+  
+  # Optimization
+  scheduler: cosine # or plateau
+  min_lr: 1.0e-6
+  patience: 5 # Early stopping patience
+  amp: true # Mixed Precision
 
 model:
   type: PoolFormerSeg
   backbone: m36 # mmpretrain arch name
-  pretrained: "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
+  # pretrained: "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
+  pretrained: null # Download automatically
   num_classes: 1
   input_size: 320 # Adjust as needed
 
 loss:
-  type: DiceLoss
+  type: DiceBCE # Dice + BCE
   mode: binary
+
+augmentation:
+  rotate: 45
+  flip: true
+  color_jitter: 0.2

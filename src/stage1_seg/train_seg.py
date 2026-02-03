@@ -51,18 +51,37 @@ class PoolFormerUNet(nn.Module):
         if hasattr(self.backbone, 'backbone'):
             self.backbone = self.backbone.backbone
         
-        # Encoder channels for m36
-        enc_channels = [64, 128, 320, 512] 
+        # Encoder channels - Determine dynamically
+        with torch.no_grad():
+            dummy = torch.randn(1, 3, 320, 320)
+            if next(self.backbone.parameters()).is_cuda:
+                dummy = dummy.cuda()
+            # Handle potential device mismatch if backbone not on device yet (init usually cpu)
+            
+            feats = self.backbone(dummy)
+            enc_channels = [f.shape[1] for f in feats]
+            print(f"[INFO] Backbone channels found: {enc_channels}")
+            
+        if len(enc_channels) != 4:
+            raise ValueError(f"Expected 4 feature maps, got {len(enc_channels)}") 
         
         # Decoder
+        # c4=384, c3=192, c2=192, c1=96 (based on log)
+        
+        # UP1: c4 -> up -> cat(c3) -> conv
         self.up1 = nn.ConvTranspose2d(enc_channels[3], enc_channels[2], 2, stride=2)
-        self.conv1 = DoubleConv(enc_channels[3], enc_channels[2]) # cat(320, 320) -> 640 -> 320
+        # Input to conv1 is cat(c3, up(c4)) = enc_channels[2] + enc_channels[2] = 2 * enc_channels[2]
+        self.conv1 = DoubleConv(enc_channels[2] * 2, enc_channels[2]) 
         
+        # UP2: c3 -> up -> cat(c2) -> conv
         self.up2 = nn.ConvTranspose2d(enc_channels[2], enc_channels[1], 2, stride=2)
-        self.conv2 = DoubleConv(enc_channels[2], enc_channels[1]) # cat(128, 128) -> 256 -> 128
+        # Input to conv2 is cat(c2, up(c3)) = enc_channels[1] + enc_channels[1] = 2 * enc_channels[1]
+        self.conv2 = DoubleConv(enc_channels[1] * 2, enc_channels[1]) 
         
+        # UP3: c2 -> up -> cat(c1) -> conv
         self.up3 = nn.ConvTranspose2d(enc_channels[1], enc_channels[0], 2, stride=2)
-        self.conv3 = DoubleConv(enc_channels[1], enc_channels[0]) # cat(64, 64) -> 128 -> 64
+        # Input to conv3 is cat(c1, up(c2)) = enc_channels[0] + enc_channels[0] = 2 * enc_channels[0]
+        self.conv3 = DoubleConv(enc_channels[0] * 2, enc_channels[0])
         
         self.up4 = nn.ConvTranspose2d(enc_channels[0], 32, 2, stride=2) # 64 -> 32 (stride 4 original so need 2 steps or direct 4)
         # Note: Stage 0 is stride 4. So we need 2 upsamples to reach stride 1 (original size).
@@ -115,18 +134,35 @@ class PoolFormerUNet(nn.Module):
 # ================== DATASET ==================
 # Reuse from previous step or imports
 class SegmentationDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_dir, split='train', transform=None):
         self.root_dir = root_dir
         self.transform = transform
         self.images = []
         self.masks = []
-        img_dir = os.path.join(root_dir, 'images')
-        mask_dir = os.path.join(root_dir, 'masks')
+        
+        # Structure: root_dir / split / image / *.png
+        #            root_dir / split / mask / *.png
+        # split can be 'train' or 'val'. If flat structure, handle accordingly.
+        
+        # Check if 'train' exists in root_dir, if so use it.
+        if os.path.exists(os.path.join(root_dir, split)):
+            work_dir = os.path.join(root_dir, split)
+        else:
+            # Maybe root_dir IS the split folder or flat
+            work_dir = root_dir
+
+        img_dir = os.path.join(work_dir, 'image') # Changed from 'images' to 'image' based on directory listing
+        mask_dir = os.path.join(work_dir, 'mask') # Changed from 'masks' to 'mask'
+        
         if os.path.exists(img_dir):
             files = sorted(os.listdir(img_dir))
             for f in files:
-                self.images.append(os.path.join(img_dir, f))
-                self.masks.append(os.path.join(mask_dir, f))
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                    self.images.append(os.path.join(img_dir, f))
+                    # Assuming mask has same name or similar
+                    self.masks.append(os.path.join(mask_dir, f))
+        else:
+            print(f"[WARN] Image directory not found: {img_dir}")
 
     def __len__(self):
         return len(self.images)
@@ -134,15 +170,52 @@ class SegmentationDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_path = self.images[idx]
         mask_path = self.masks[idx]
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        try:
+            image = Image.open(img_path).convert("RGB")
+            mask = Image.open(mask_path).convert("L")
+        except Exception as e:
+            print(f"[ERR] Loading {img_path}: {e}")
+            # Return dummy or handle error
+            return torch.zeros((3, 320, 320)), torch.zeros((1, 320, 320))
+
         if self.transform:
-            image = self.transform(image)
-            mask = transforms.Resize(image.shape[1:], interpolation=transforms.InterpolationMode.NEAREST)(mask)
-            mask = np.array(mask)
-            mask = (mask > 128).astype(np.float32)
-            mask = torch.from_numpy(mask).unsqueeze(0)
+            # Check if transform supports both args (JointTransform)
+            try:
+                # Assuming JointTransform or similar callable accepting (image, mask)
+                image, mask = self.transform(image, mask)
+                # Ensure mask is correct shape/type if transform didn't handle it fully 
+                # (transforms.py JointTransform returns tensors, so we might skip manual conversion below)
+            except TypeError:
+                # Fallback for standard torchvision transforms (image only)
+                image = self.transform(image)
+                # Resize mask to simple match input size (assumed 320 from config)
+                target_size = image.shape[1:]
+                mask = transforms.Resize(target_size, interpolation=transforms.InterpolationMode.NEAREST)(mask)
+                mask = np.array(mask)
+                mask = (mask > 128).astype(np.float32)
+                mask = torch.from_numpy(mask).unsqueeze(0)
         return image, mask
+
+
+# ================== LOSS ==================
+class DiceBCELoss(nn.Module):
+    def __init__(self, weight=None, size_average=True):
+        super(DiceBCELoss, self).__init__()
+
+    def forward(self, inputs, targets, smooth=1):
+        # Flatten
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+        
+        # BCE
+        bce = nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='mean')
+        
+        # Dice
+        inputs = torch.sigmoid(inputs)
+        intersection = (inputs * targets).sum()                            
+        dice = (2.*intersection + smooth)/(inputs.sum() + targets.sum() + smooth)  
+        
+        return bce + (1 - dice)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -160,35 +233,72 @@ def main():
     
     # Model
     print(f"[INFO] Loading PoolFormer backbone: {cfg['model']['backbone']}")
+    
+    backbone_type = cfg['model']['backbone']
+    if backbone_type == 'm36':
+        backbone_name = 'poolformer-m36_3rdparty_32xb128_in1k'
+    else:
+        backbone_name = f"poolformer_{backbone_type}_3rdparty_in1k"
+
     model = PoolFormerUNet(
-        backbone_name=f"poolformer_{cfg['model']['backbone']}_3rdparty_in1k", # e.g. 'poolformer_m36_3rdparty_in1k'
+        backbone_name=backbone_name, 
         pretrained_path=cfg['model']['pretrained']
     ).to(device)
     
-    # Data
-    transform = transforms.Compose([
-        transforms.Resize((cfg['model'].get('input_size', 320), cfg['model'].get('input_size', 320))),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    # Data & Augmentation
+    try:
+        from transforms import JointTransform
+        # Augmentation for training
+        train_transform = JointTransform(use_aug=True)
+        # No aug for val, but need normalization/tensor conversion
+        val_transform = JointTransform(use_aug=False)
+    except ImportError:
+        print("[WARN] transform.py not found using simple transforms")
+        # Fallback
+        train_transform = transforms.Compose([
+            transforms.Resize((320, 320)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        val_transform = train_transform
     
-    dataset = SegmentationDataset(cfg['training']['data_root'], transform=transform)
-    if len(dataset) == 0:
-        print("[WARN] No data found. Exiting.")
+    # Initialize datasets using the new split logic
+    train_dataset = SegmentationDataset(cfg['training']['data_root'], split='train', transform=train_transform)
+    val_dataset = SegmentationDataset(cfg['training']['data_root'], split='val', transform=val_transform)
+    
+    if len(train_dataset) == 0:
+        print("[WARN] No training data found.")
         return
+        
+    if len(val_dataset) == 0:
+        print("[INFO] No validation data found. Splitting training data 80/20.")
+        val_size = int(0.2 * len(train_dataset))
+        train_size = len(train_dataset) - val_size
+        train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
 
-    val_size = int(0.2 * len(dataset))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+    print(f"[INFO] Train Samples: {len(train_dataset)} | Val Samples: {len(val_dataset)}")
     
-    train_loader = DataLoader(train_ds, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=cfg['training']['num_workers'])
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
-
+    train_loader = DataLoader(train_dataset, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=cfg['training']['num_workers'])
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    
+    # Optimization Setup
     optimizer = optim.AdamW(model.parameters(), lr=float(cfg['training']['lr']), weight_decay=float(cfg['training']['wd']))
-    criterion = nn.BCEWithLogitsLoss()
-
+    
+    # Scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['training']['epochs'], eta_min=float(cfg['training'].get('min_lr', 1e-6)))
+    
+    # Loss
+    criterion = DiceBCELoss()
+    
+    # MP
+    use_amp = cfg['training'].get('amp', False)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    
     # Loop
     epochs = cfg['training']['epochs']
+    patience = cfg['training'].get('patience', 5)
+    best_iou = 0.0
+    counter = 0 # Early stopping counter
     
     for epoch in range(1, epochs + 1):
         model.train()
@@ -197,10 +307,14 @@ def main():
             imgs, masks = imgs.to(device), masks.to(device)
             
             optimizer.zero_grad()
-            outputs = model(imgs)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            optimizer.step()
+            
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                outputs = model(imgs)
+                loss = criterion(outputs, masks)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             epoch_loss += loss.item()
         
@@ -213,8 +327,11 @@ def main():
         with torch.no_grad():
             for imgs, masks in val_loader:
                 imgs, masks = imgs.to(device), masks.to(device)
-                outputs = model(imgs)
-                loss = criterion(outputs, masks)
+                
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    outputs = model(imgs)
+                    loss = criterion(outputs, masks)
+                
                 val_loss += loss.item()
                 
                 # Calculate IoU
@@ -227,13 +344,26 @@ def main():
         avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0
         avg_iou = total_iou / len(val_loader) if len(val_loader) > 0 else 0
         
-        print(f"Epoch {epoch}/{epochs} - Loss: {avg_loss:.4f} - Val Loss: {avg_val_loss:.4f} - Val IoU: {avg_iou:.4f}")
+        # Step Scheduler
+        current_lr = scheduler.get_last_lr()[0]
+        scheduler.step()
+        
+        print(f"Epoch {epoch}/{epochs} [LR: {current_lr:.2e}] - Loss: {avg_loss:.4f} - Val Loss: {avg_val_loss:.4f} - Val IoU: {avg_iou:.4f}")
         
         # Log
-        logger.log_epoch(epoch, {'train_loss': avg_loss, 'val_loss': avg_val_loss, 'val_iou': avg_iou})
+        logger.log_epoch(epoch, {'train_loss': avg_loss, 'val_loss': avg_val_loss, 'val_iou': avg_iou, 'lr': current_lr})
         
-        # Save Best (Maximizing IoU)
-        logger.save_model(model, avg_iou, metric_name='iou', mode='max')
+        # Save Best & Early Stopping
+        is_best = logger.save_model(model, avg_iou, metric_name='iou', mode='max')
+        
+        if is_best:
+            best_iou = avg_iou
+            counter = 0
+        else:
+            counter += 1
+            if counter >= patience:
+                print(f"[INFO] Early stopping triggered at epoch {epoch}. Best IoU: {best_iou:.4f}")
+                break
 
 if __name__ == '__main__':
     main()
