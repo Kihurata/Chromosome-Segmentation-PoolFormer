@@ -15,6 +15,11 @@ training:
   min_lr: 1.0e-6
   patience: 5 # Early stopping patience
   amp: true # Mixed Precision
+  warmup_epochs: 5 # Linear Warmup
+  deep_supervision: true # Aux heads
+
+inference:
+  tta: true # Test Time Augmentation (Horizontal/Vertical Flip)
 
 model:
   type: PoolFormerSeg
@@ -22,7 +27,7 @@ model:
   # pretrained: "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
   pretrained: null # Download automatically
   num_classes: 1
-  input_size: 320 # Adjust as needed
+  input_size: 512 # Increased resolution
 
 loss:
   type: DiceBCE # Dice + BCE
