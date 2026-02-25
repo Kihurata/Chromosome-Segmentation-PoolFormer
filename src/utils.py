@@ -43,8 +43,14 @@ class ExperimentLogger:
         Log metrics for current epoch
         metrics_dict example: {'loss': 0.5, 'accuracy': 0.9, 'iou': 0.85}
         """
-        metrics_dict['epoch'] = epoch
-        self.metrics_log.append(metrics_dict)
+        # Merge with existing epoch data if present
+        existing_epoch_idx = next((i for i, d in enumerate(self.metrics_log) if d.get('epoch') == epoch), -1)
+        
+        if existing_epoch_idx != -1:
+            self.metrics_log[existing_epoch_idx].update(metrics_dict)
+        else:
+            metrics_dict['epoch'] = epoch
+            self.metrics_log.append(metrics_dict)
         
         # Save to CSV every epoch
         df = pd.DataFrame(self.metrics_log)

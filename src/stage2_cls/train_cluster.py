@@ -4,7 +4,7 @@ import argparse
 import yaml
 from mmengine.config import Config
 from mmengine.runner import Runner
-from mmengine.registry import init_default_scope
+from mmengine import init_default_scope
 from mmengine.hooks import Hook
 from mmengine.registry import HOOKS
 import torch
@@ -28,20 +28,70 @@ class AdapterLoggerHook(Hook):
     def __init__(self, experiment_logger):
         self.logger = experiment_logger
 
-    def after_train_epoch(self, runner):
+    def after_train_epoch(self, runner, **kwargs):
         # Collect metrics
-        metrics = runner.message_hub.get_scalar_metrics()
+        if hasattr(runner.message_hub, 'get_scalar_metrics'):
+            metrics = runner.message_hub.get_scalar_metrics()
+        else:
+            # Fallback for older mmengine versions
+            metrics = runner.message_hub.log_scalars
         # Filter for current epoch metrics or just dump all scalars
         # mmengine stores scalars. We want 'loss', 'acc', etc.
-        log_dict = {k: v.current_value(mode='mean') for k, v in metrics.items()}
-        
-        # We can also add mode='train' prefix if needed
-        self.logger.log_epoch(runner.epoch + 1, log_dict)
+        log_dict = {}
+        for k, v in metrics.items():
+            if hasattr(v, 'current_value'):
+                val = v.current_value(mode='mean')
+            elif hasattr(v, 'mean'):
+                val = v.mean()
+            else:
+                # Last resort: try accessing index -1
+                try:
+                    val = v.data[-1]
+                except:
+                    val = 0.0
+            log_dict[k] = val
+        # Prepare Clean Training Log Dcit
+        clean_log_dict = {}
+        for k, v in log_dict.items():
+            if 'loss' in k:
+               clean_log_dict['train_loss'] = v
+            elif 'accuracy' in k:
+               clean_log_dict['train_acc'] = v
+            else:
+               clean_log_dict[k] = v # Keep other keys like 'lr'
+               
+        self.logger.log_epoch(runner.epoch + 1, clean_log_dict)
 
-    def after_val_epoch(self, runner):
-        metrics = runner.message_hub.get_scalar_metrics()
-        # get validation metrics (usually prefixed with 'single-label/')
-        val_metrics = {k: v.current_value(mode='mean') for k, v in metrics.items() if 'single-label' in k}
+    def after_val_epoch(self, runner, metrics=None, **kwargs):
+        val_metrics = {}
+        
+        # Case 1: metrics passed directly (new mmengine structure)
+        if metrics is not None:
+             # These are raw values, usually dict[str, float]
+             # Filter validation metrics
+             val_metrics = {k: v for k, v in metrics.items() if 'single-label' in k}
+             
+        # Case 2: metrics not passed, fetch from message_hub (older mmengine)
+        else:
+            if hasattr(runner.message_hub, 'get_scalar_metrics'):
+                hub_metrics = runner.message_hub.get_scalar_metrics()
+            else:
+                hub_metrics = runner.message_hub.log_scalars
+                
+            for k, v in hub_metrics.items():
+                if 'single-label' not in k:
+                    continue
+                    
+                if hasattr(v, 'current_value'):
+                    val = v.current_value(mode='mean')
+                elif hasattr(v, 'mean'):
+                    val = v.mean()
+                else:
+                    try:
+                        val = v.data[-1]
+                    except:
+                        val = 0.0
+                val_metrics[k] = val
         
         # Log to csv (update the row for this epoch)
         # Note: log_epoch might have been called in after_train_epoch. 
@@ -52,14 +102,33 @@ class AdapterLoggerHook(Hook):
         # For simplicity, we'll log val separately or together.
         # Let's try to merge if possible, but hooks are separate.
         # We will just log validation metrics.
+        # Prepare Clean Validation Log Dict
+        clean_val_dict = {}
         if val_metrics:
-            self.logger.log_epoch(runner.epoch + 1, val_metrics)
+            for k, v in val_metrics.items():
+                if 'accuracy' in k:
+                    clean_val_dict['val_accuracy'] = v
+                elif 'f1-score' in k:
+                    clean_val_dict['val_f1'] = v
+                elif 'precision' in k:
+                    clean_val_dict['val_precision'] = v
+                elif 'recall' in k:
+                    clean_val_dict['val_recall'] = v
+                # Note: val_loss is usually not computed by SingleLabelMetric/Accuracy, 
+                # unless a separate Loss metric is added to val_evaluator. 
+                # If 'loss' appears in val_metrics, map it.
+                elif 'loss' in k:
+                    clean_val_dict['val_loss'] = v
+                else:
+                    clean_val_dict[k] = v
+
+            self.logger.log_epoch(runner.epoch + 1, clean_val_dict)
             
             # Check for best model
-            # Assuming 'single-label/accuracy_top1' or 'single-label/f1-score' as metric
-            target_metric = 'single-label/f1-score' # Default to f1
-            if target_metric in val_metrics:
-                score = val_metrics[target_metric]
+            # Use the cleaned metric name 'val_f1'
+            target_metric = 'val_f1' 
+            if target_metric in clean_val_dict:
+                score = clean_val_dict[target_metric]
                 self.logger.save_model(runner.model, score, metric_name='f1', mode='max')
 
 def parse_args():
@@ -67,27 +136,11 @@ def parse_args():
     parser.add_argument('--config', default='configs/stage2_cls.yaml', help='path to config file')
     return parser.parse_args()
 
-# ================== MAIN ==================
-if __name__ == '__main__':
-    args = parse_args()
-    
-    # 1. Load YAML Config
-    # Assuming run from root NCKH/
-    project_root = os.getcwd()
-    config_path = os.path.join(project_root, args.config)
-    
-    with open(config_path, 'r') as f:
-        yaml_cfg = yaml.safe_load(f)
 
-    # 2. Setup ExperimentLogger
-    logger = ExperimentLogger(yaml_cfg)
-    print(f"[INFO] Experiment Directory: {logger.exp_dir}")
-
-    # 3. Construct MM Configuration
-    # We map YAML values to the MM dict structure
-    
+def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
+    # Mapping YAML values to MM dict structure
     DATA_ROOT = yaml_cfg['training']['data_root']
-    WORK_DIR = logger.exp_dir # Use logger's dir
+    WORK_DIR = work_dir
     
     IMG_SIZE = yaml_cfg['model']['input_size']
     EPOCHS = yaml_cfg['training']['epochs']
@@ -97,9 +150,6 @@ if __name__ == '__main__':
     WD = float(yaml_cfg['training']['weight_decay'])
     CLASSES = yaml_cfg['model']['classes']
     NUM_CLASSES = len(CLASSES)
-    
-    # ... [Copying pipelines and model definitions from original file] ...
-    # To keep this clean, I will inline the definitions but use variables
     
     train_pipeline = [
         dict(type='LoadImageFromFile'),
@@ -122,10 +172,11 @@ if __name__ == '__main__':
     # Datasets
     train_dataset = dict(
         type='mmpretrain.ImageNet',
-        data_root=DATA_ROOT, # logic for split updated below
+        data_root=DATA_ROOT,
         data_prefix='',
         classes=CLASSES,
         pipeline=train_pipeline,
+        ann_file=ann_train
     )
     val_dataset = dict(
         type='mmpretrain.ImageNet',
@@ -133,6 +184,7 @@ if __name__ == '__main__':
         data_prefix='',
         classes=CLASSES,
         pipeline=test_pipeline,
+        ann_file=ann_val
     )
 
     train_dataloader = dict(
@@ -162,9 +214,12 @@ if __name__ == '__main__':
     ]
     test_evaluator = val_evaluator
 
-    # Model
+    # Model - Safe Pretrained Loading
     PRETRAIN = yaml_cfg['model']['pretrain_weights']
-    init_cfg = dict(type='Pretrained', checkpoint=PRETRAIN) if os.path.isfile(PRETRAIN) else None
+    if PRETRAIN and os.path.isfile(PRETRAIN):
+        init_cfg = dict(type='Pretrained', checkpoint=PRETRAIN)
+    else:
+        init_cfg = None
 
     model = dict(
         type=yaml_cfg['model']['type'],
@@ -217,10 +272,9 @@ if __name__ == '__main__':
         early_stopping=dict(type='EarlyStoppingHook', monitor='single-label/f1-score', rule='greater', patience=8)
     )
     
-    # Add our Adapter Hook
+    # Custom Hooks
     custom_hooks = [
         dict(type='EMAHook', momentum=0.0002, update_buffers=True),
-        AdapterLoggerHook(experiment_logger=logger)
     ]
 
     cfg = Config(dict(
@@ -245,61 +299,106 @@ if __name__ == '__main__':
         resume=yaml_cfg['training']['resume'],
         env_cfg=dict(cudnn_benchmark=True),
     ))
+    return cfg
 
-    # === Pre-Split Logic (Copied from original) ===
+# ================== MAIN ==================
+if __name__ == '__main__':
+    args = parse_args()
+    
+    # 1. Load YAML Config
+    # Assuming run from root NCKH/
+    project_root = os.getcwd()
+    config_path = os.path.join(project_root, args.config)
+    
+    with open(config_path, 'r') as f:
+        yaml_cfg = yaml.safe_load(f)
+
+    # 2. Setup ExperimentLogger
+    logger = ExperimentLogger(yaml_cfg)
+    print(f"[INFO] Experiment Directory: {logger.exp_dir}")
+
+
+    # Config building block removed from here as it is moved outside
+    DATA_ROOT = yaml_cfg['training']['data_root']
+    WORK_DIR = logger.exp_dir # Use logger's dir
+    CLASSES = yaml_cfg['model']['classes'] # Needed for get_file_list below
+
+
+    # === Data Split Logic ===
     import glob
     from sklearn.model_selection import train_test_split
-    
-    def list_items(root_dir, classes):
+
+    def get_file_list(folder, classes):
         items = []
-        # Check if train/val split exists or flat structure
-        # Original code checked 'train' and 'val' subdirs for each class
-        # We'll assume the same structure or adapt
         for cls_idx, cls in enumerate(classes):
-            for split in ['train', 'val']: # Check both just in case
-                folder = os.path.join(root_dir, split, cls)
-                if not os.path.isdir(folder):
-                    # Try flat structure (root/class)
-                    folder = os.path.join(root_dir, cls)
-                    if not os.path.isdir(folder):
-                        continue
-                
-                for p in glob.glob(os.path.join(folder, '*')):
-                    if os.path.isfile(p):
-                        rel = os.path.relpath(p, root_dir)
-                        items.append((rel.replace('\\', '/'), cls_idx))
-        items = list(set(items)) # dedupe
-        items.sort(key=lambda x: x[0])
+            cls_folder = os.path.join(folder, cls)
+            if not os.path.isdir(cls_folder):
+                continue
+            
+            for p in glob.glob(os.path.join(cls_folder, '*')):
+                if os.path.isfile(p):
+                    rel = os.path.relpath(p, DATA_ROOT) # relative to DATA_ROOT
+                    items.append((rel.replace('\\', '/'), cls_idx))
+        items.sort()
         return items
 
-    all_items = list_items(DATA_ROOT, CLASSES)
-    if not all_items:
-        print(f"[WARNING] No data found in {DATA_ROOT}. Please check paths.")
+    # Check for train/val structure
+    train_dir = os.path.join(DATA_ROOT, 'train')
+    val_dir = os.path.join(DATA_ROOT, 'val')
+    
+    has_explicit_split = os.path.isdir(train_dir) and os.path.isdir(val_dir)
+
+    if has_explicit_split:
+        print(f"[INFO] Found explicit train/val split in {DATA_ROOT}")
+        train_items = get_file_list(train_dir, CLASSES)
+        val_items = get_file_list(val_dir, CLASSES)
     else:
-        labels = [y for _, y in all_items]
-        train_items, val_items = train_test_split(all_items, test_size=0.2, random_state=42, stratify=labels)
+        print(f"[INFO] No explicit split found. Checking flat structure in {DATA_ROOT}")
+        # Legacy flat structure support
+        all_items = get_file_list(DATA_ROOT, CLASSES)
+        if not all_items:
+             print(f"[WARNING] No data found in {DATA_ROOT}. Please check paths.")
+             train_items, val_items = [], []
+        else:
+            labels = [y for _, y in all_items]
+            train_items, val_items = train_test_split(all_items, test_size=0.2, random_state=42, stratify=labels)
 
-        # Generate annotation files in EXP_DIR
-        ann_train = os.path.join(WORK_DIR, 'train_80.txt')
-        ann_val   = os.path.join(WORK_DIR, 'val_20.txt')
+    if not train_items:
+        print("[ERROR] No training items found!")
+        sys.exit(1)
 
-        with open(ann_train, 'w', encoding='utf-8') as f:
-            for rel, y in train_items:
-                f.write(f'{rel} {y}\n')
-        with open(ann_val, 'w', encoding='utf-8') as f:
-            for rel, y in val_items:
-                f.write(f'{rel} {y}\n')
+    # Generate annotation files in EXP_DIR
+    # Make absolute so mmpretrain doesn't join with data_root
+    ann_train = os.path.abspath(os.path.join(WORK_DIR, 'train.txt'))
+    ann_val   = os.path.abspath(os.path.join(WORK_DIR, 'val.txt'))
 
-        cfg.train_dataloader['dataset']['ann_file'] = ann_train
-        cfg.val_dataloader['dataset']['ann_file']   = ann_val
-        
-        # Calculate Class Weights (Optional)
-        from collections import Counter
-        cnt_train = Counter([y for _, y in train_items])
-        print(f"[INFO] Train Samples: {len(train_items)} | Val Samples: {len(val_items)}")
-        print(f"[INFO] Class Counts: {cnt_train}")
+    with open(ann_train, 'w', encoding='utf-8') as f:
+        for rel, y in train_items:
+            f.write(f'{rel} {y}\n')
+    with open(ann_val, 'w', encoding='utf-8') as f:
+        for rel, y in val_items:
+            f.write(f'{rel} {y}\n')
 
-        # Run
-        init_default_scope('mmpretrain')
-        runner = Runner.from_cfg(cfg)
-        runner.train()
+    # Build Config
+    cfg = build_mm_config(
+        yaml_cfg=yaml_cfg,
+        work_dir=WORK_DIR,
+        ann_train=ann_train,
+        ann_val=ann_val
+    )
+    
+    # Calculate Class Weights (Optional logging)
+    from collections import Counter
+    cnt_train = Counter([y for _, y in train_items])
+    print(f"[INFO] Train Samples: {len(train_items)} | Val Samples: {len(val_items)}")
+    print(f"[INFO] Class Counts: {cnt_train}")
+
+    # Run
+    print("--> Initializing Default Scope")
+    init_default_scope('mmpretrain')
+    print("--> Building Runner")
+    runner = Runner.from_cfg(cfg)
+    # Register AdapterLoggerHook manually to avoid config serialization errors
+    runner.register_hook(AdapterLoggerHook(experiment_logger=logger))
+    print("--> Starting Training")
+    runner.train()

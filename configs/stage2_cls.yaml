@@ -5,10 +5,10 @@ training:
   save_dir: "experiments"
   work_dir: "experiments/stage2_cls" # Legacy support if code uses it
   resume: true
-  epochs: 100
-  batch_size: 8
+  epochs: 20
+  batch_size: 16
   num_workers: 4
-  base_lr: 2.0e-4
+  base_lr: 4.0e-4
   weight_decay: 0.05
   val_interval: 2
   ckpt_interval: 5
@@ -19,8 +19,8 @@ model:
   arch: m36
   num_classes: 3
   classes: ['single', 'overlapping', 'touching']
-  input_size: 320
-  pretrain_weights: "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
+  input_size: 512
+  pretrain_weights: null # "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
 
 augmentation:
   mixup_alpha: 0.8
