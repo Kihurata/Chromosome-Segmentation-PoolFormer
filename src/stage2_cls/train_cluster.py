@@ -92,7 +92,6 @@ class AdapterLoggerHook(Hook):
                     except:
                         val = 0.0
                 val_metrics[k] = val
-        
         # Log to csv (update the row for this epoch)
         # Note: log_epoch might have been called in after_train_epoch. 
         # ExperimentLogger appends a row. We might be appending twice per epoch?
@@ -241,7 +240,7 @@ def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
             type='mmpretrain.LinearClsHead',
             num_classes=NUM_CLASSES,
             in_channels=768, 
-            loss=dict(type='mmpretrain.FocalLoss', gamma=2.0, alpha=0.25, loss_weight=1.0),
+            loss=dict(type='mmpretrain.CrossEntropyLoss', loss_weight=1.0, use_soft=True),
             cal_acc=False
         ),
         init_cfg=init_cfg
@@ -297,9 +296,20 @@ def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
         log_level='INFO',
         launcher='none',
         resume=yaml_cfg['training']['resume'],
+        load_from=yaml_cfg['training'].get('load_from', None),
         env_cfg=dict(cudnn_benchmark=True),
     ))
     return cfg
+
+def get_latest_checkpoint(base_dir):
+    """Tìm file .pth mới nhất trong tất cả các thư mục con của base_dir."""
+    import glob
+    # Tìm tất cả file .pth trong các thư mục con
+    checkpoint_files = glob.glob(os.path.join(base_dir, "**", "*.pth"), recursive=True)
+    if not checkpoint_files:
+        return None
+    # Trả về file có thời gian chỉnh sửa mới nhất
+    return max(checkpoint_files, key=os.path.getmtime)
 
 # ================== MAIN ==================
 if __name__ == '__main__':
@@ -378,6 +388,19 @@ if __name__ == '__main__':
     with open(ann_val, 'w', encoding='utf-8') as f:
         for rel, y in val_items:
             f.write(f'{rel} {y}\n')
+
+    # Logic tự động tìm checkpoint nếu resume được bật
+    if yaml_cfg['training'].get('resume'):
+        # Đường dẫn gốc chứa các folder timestamp
+        base_stage_dir = os.path.join(project_root, "experiments", "stage2_cls")
+        latest_ckpt = get_latest_checkpoint(base_stage_dir)
+        
+        if latest_ckpt:
+            print(f"[INFO] Auto-detected latest checkpoint: {latest_ckpt}")
+            yaml_cfg['training']['load_from'] = latest_ckpt
+        else:
+            print("[WARNING] Resume is True but no checkpoint found. Training from scratch.")
+            yaml_cfg['training']['resume'] = False
 
     # Build Config
     cfg = build_mm_config(

@@ -23,3 +23,5 @@ work_dirs/
 
 # --- Giữ lại cấu trúc thư mục rỗng ---
 !**/.gitkeep
+
+/.agent
