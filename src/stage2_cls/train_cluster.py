@@ -213,9 +213,9 @@ def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
     ]
     test_evaluator = val_evaluator
 
-    # Model - Safe Pretrained Loading
+    # Model - Pretrained Loading (File or URL)
     PRETRAIN = yaml_cfg['model']['pretrain_weights']
-    if PRETRAIN and os.path.isfile(PRETRAIN):
+    if PRETRAIN:
         init_cfg = dict(type='Pretrained', checkpoint=PRETRAIN)
     else:
         init_cfg = None
@@ -232,15 +232,23 @@ def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
                     dict(type='Mixup', alpha=yaml_cfg['augmentation']['mixup_alpha']),
                     dict(type='CutMix', alpha=yaml_cfg['augmentation']['cutmix_alpha']),
                 ]
-            )
+            ) if (yaml_cfg['augmentation']['mixup_alpha'] > 0 or yaml_cfg['augmentation']['cutmix_alpha'] > 0) else None
         ),
-        backbone=dict(type='mmpretrain.PoolFormer', arch=yaml_cfg['model']['arch']),
+        backbone=dict(
+            type='mmpretrain.PoolFormer', 
+            arch=yaml_cfg['model']['arch']
+        ),
         neck=dict(type='GlobalAveragePooling'),
         head=dict(
             type='mmpretrain.LinearClsHead',
             num_classes=NUM_CLASSES,
             in_channels=768, 
-            loss=dict(type='mmpretrain.CrossEntropyLoss', loss_weight=1.0, use_soft=True),
+            loss=dict(
+                type='mmpretrain.FocalLoss', 
+                loss_weight=1.0, 
+                gamma=2.0, 
+                alpha=0.25
+            ),
             cal_acc=False
         ),
         init_cfg=init_cfg
@@ -253,14 +261,16 @@ def build_mm_config(yaml_cfg, work_dir, ann_train, ann_val):
         paramwise_cfg=dict(custom_keys={'norm': dict(decay_mult=0.0), 'pos_block': dict(decay_mult=0.0), 'head': dict(lr_mult=1.0)})
     )
     
+    ACCUM_ITER = yaml_cfg['training'].get('accum_iter', 1)
     if torch.cuda.is_available():
-        optim_wrapper = dict(type='AmpOptimWrapper', dtype='float16', **common_optim_cfg)
+        optim_wrapper = dict(type='AmpOptimWrapper', dtype='float16', accumulative_counts=ACCUM_ITER, **common_optim_cfg)
     else:
-        optim_wrapper = dict(type='OptimWrapper', **common_optim_cfg)
+        optim_wrapper = dict(type='OptimWrapper', accumulative_counts=ACCUM_ITER, **common_optim_cfg)
 
+    WARMUP_EPOCHS = yaml_cfg['training'].get('warmup_epochs', 5)
     param_scheduler = [
-        dict(type='LinearLR', start_factor=1e-6, by_epoch=False, begin=0, end=1500),
-        dict(type='CosineAnnealingLR', T_max=EPOCHS, by_epoch=True),
+        dict(type='LinearLR', start_factor=1e-6, by_epoch=True, begin=0, end=WARMUP_EPOCHS, convert_to_iter_based=True),
+        dict(type='CosineAnnealingLR', T_max=EPOCHS - WARMUP_EPOCHS, by_epoch=True, begin=WARMUP_EPOCHS),
     ]
 
     # Hooks

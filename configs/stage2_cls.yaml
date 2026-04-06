@@ -5,13 +5,16 @@ training:
   save_dir: "experiments"
   work_dir: "experiments/stage2_cls" # Legacy support if code uses it
   resume: false
-  epochs: 60
+  epochs: 80
+  load_from: "experiments/stage2_cls/20260404_2312_poolformer_m36_cls/epoch_60.pth"
   batch_size: 8
   num_workers: 1
   base_lr: 1.0e-4
   weight_decay: 0.05
   val_interval: 2
   ckpt_interval: 5
+  warmup_epochs: 5
+  accum_iter: 4
   seed: 42
 
 
@@ -21,11 +24,16 @@ model:
   num_classes: 3
   classes: ['single', 'overlapping', 'touching']
   input_size: 512
-  pretrain_weights: null # "D:\\NCKH\\weights\\poolformer_m36_3rdparty_in1k_20220321-61f05dac.pth"
+  pretrain_weights: "D:\\Code\\NCKH\\weights\\poolformer_m36.pth"
+  act_cfg:
+    type: ReLU
+  norm_cfg:
+    type: GroupNorm
+    num_groups: 1
 
 augmentation:
-  mixup_alpha: 0.4
-  cutmix_alpha: 0.4
+  mixup_alpha: 0.0
+  cutmix_alpha: 0.0
   random_erase_prob: 0.2
   random_rotate_angle: [-180, 180]
   color_jitter: [0.1, 0.1, 0.1, 0.02]
