@@ -3,7 +3,7 @@ experiment_name: poolformer_overlapping_v1
 
 training:
   data_root: "C:\\data\\stage3_separation\\overlapping"
-  save_dir: "experiments"
+  save_dir: "experiments/stage3_sep"
   work_dir: "experiments/stage3_sep" # Legacy support if code uses it
   epochs: 100
   warmup_epochs: 5

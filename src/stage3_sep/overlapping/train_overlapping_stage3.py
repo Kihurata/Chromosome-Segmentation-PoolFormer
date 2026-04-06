@@ -4,6 +4,8 @@ import os
 import random
 from pathlib import Path
 import yaml
+import shutil
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -19,33 +21,7 @@ from dataset_overlapping_stage3 import (
     get_stage3_overlapping_multitask_transforms,
 )
 
-DATA_ROOT = None
-OUT_DIR = None
 
-IMG_SIZE = None
-BATCH_SIZE = None
-EPOCHS = None
-WARMUP_EPOCHS = None
-LR = None
-WEIGHT_DECAY = None
-PATIENCE = None
-PRETRAINED_WEIGHT_PATH = None
-MIN_DELTA = None
-NUM_WORKERS = None
-SEED = None
-
-LAMBDA_FG = None
-LAMBDA_OVERLAP = None
-LAMBDA_BOUNDARY = None
-LAMBDA_CONSISTENCY = None
-
-FG_THRESHOLD = None
-OVERLAP_THRESHOLD = None
-BOUNDARY_THRESHOLD = None
-BOUNDARY_POS_WEIGHT = None
-
-RESUME_TRAINING = False
-RESUME_CHECKPOINT = None
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_AMP = torch.cuda.is_available()
@@ -59,14 +35,21 @@ def update_globals_from_config(config_path):
     global LR, WEIGHT_DECAY, PATIENCE, PRETRAINED_WEIGHT_PATH, MIN_DELTA, NUM_WORKERS, SEED
     global LAMBDA_FG, LAMBDA_OVERLAP, LAMBDA_BOUNDARY, LAMBDA_CONSISTENCY
     global FG_THRESHOLD, OVERLAP_THRESHOLD, BOUNDARY_THRESHOLD, BOUNDARY_POS_WEIGHT
-    global RESUME_CHECKPOINT
+    global RESUME_CHECKPOINT, RESUME_TRAINING
 
     with open(config_path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
 
     DATA_ROOT = cfg['training']['data_root']
-    OUT_DIR = Path(cfg['training']['save_dir'])
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    base_save_dir = Path(cfg['training']['save_dir'])
+    OUT_DIR = base_save_dir / f"{timestamp}_poolformer_stage3"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Snapshot config
+    shutil.copy(config_path, OUT_DIR / "config.yaml")
+    
     IMG_SIZE = cfg['model']['input_size']
     BATCH_SIZE = cfg['training']['batch_size']
     EPOCHS = cfg['training']['epochs']
@@ -89,6 +72,7 @@ def update_globals_from_config(config_path):
     BOUNDARY_THRESHOLD = float(cfg['loss'].get('boundary_threshold', 0.35))
     BOUNDARY_POS_WEIGHT = float(cfg['loss'].get('boundary_pos_weight', 3.0))
     RESUME_CHECKPOINT = OUT_DIR / "stage3_overlapping_multitask_last_checkpoint.pth"
+    RESUME_TRAINING = cfg['training'].get('resume', False)
 
 
 def set_seed(seed=42):
@@ -177,6 +161,23 @@ class BCETverskyLoss(nn.Module):
 
     def forward(self, logits, targets):
         return self.bce_weight * self.bce(logits, targets) + self.tversky_weight * self.tversky(logits, targets)
+
+
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, alpha=0.5, gamma=2.0, pos_weight=None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
+
+    def forward(self, logits, targets):
+        bce_loss = self.bce(logits, targets)
+        probas = torch.sigmoid(logits)
+        p_t = probas * targets + (1 - probas) * (1 - targets)
+        alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+        focal_weight = alpha_t * (1 - p_t) ** self.gamma
+        loss = focal_weight * bce_loss
+        return loss.mean()
 
 
 class MultiHeadOverlapBoundaryNet(nn.Module):
@@ -459,7 +460,7 @@ def main():
 
     boundary_pos_weight = torch.tensor([BOUNDARY_POS_WEIGHT], device=DEVICE)
     criterion_fg = BCEDiceLoss(0.5, 0.5)
-    criterion_overlap = BCETverskyLoss(bce_weight=0.3, tversky_weight=0.7, alpha=0.35, beta=0.65)
+    criterion_overlap = BinaryFocalLoss(alpha=0.5, gamma=2.0)
     criterion_boundary = BCEDiceLoss(0.6, 0.4, pos_weight=boundary_pos_weight)
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)

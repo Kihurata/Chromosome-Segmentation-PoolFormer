@@ -21,6 +21,54 @@ def get_transform(img_size=384):
         ToTensorV2(),
     ])
 
+def clean_mask(mask, morph_size=3):
+    """Làm sạch các nhiễu nhỏ li ti trên mask bằng Morphological Opening"""
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_size, morph_size))
+    cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return cleaned
+
+def predict_with_tta(model, img_tensor):
+    """
+    Áp dụng Test-Time Augmentation bằng cách dự đoán trên nhiều bản xoay lật 
+    sau đó lấy trung bình để khử nhiễu vùng Overlap.
+    Dùng 4 phép: Identity, Horizontal Flip, Vertical Flip, Rot180
+    """
+    fg_probs, ov_probs, bd_probs = [], [], []
+
+    # 1. Identity
+    def aug_id(x): return x
+    def deaug_id(x): return x
+
+    # 2. Horizontal Flip
+    def aug_hf(x): return torch.flip(x, dims=[3])
+    def deaug_hf(x): return torch.flip(x, dims=[3])
+
+    # 3. Vertical Flip
+    def aug_vf(x): return torch.flip(x, dims=[2])
+    def deaug_vf(x): return torch.flip(x, dims=[2])
+
+    # 4. Rotate 180 (vflip + hflip)
+    def aug_rot180(x): return torch.flip(x, dims=[2, 3])
+    def deaug_rot180(x): return torch.flip(x, dims=[2, 3])
+
+    transforms = [(aug_id, deaug_id), (aug_hf, deaug_hf), (aug_vf, deaug_vf), (aug_rot180, deaug_rot180)]
+
+    for aug, deaug in transforms:
+        aug_img = aug(img_tensor)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                fg_logits, ov_logits, bd_logits = model(aug_img)
+            
+        fg_prob = torch.sigmoid(fg_logits)
+        ov_prob = torch.sigmoid(ov_logits)
+        bd_prob = torch.sigmoid(bd_logits)
+        
+        fg_probs.append(deaug(fg_prob).squeeze().cpu().numpy())
+        ov_probs.append(deaug(ov_prob).squeeze().cpu().numpy())
+        bd_probs.append(deaug(bd_prob).squeeze().cpu().numpy())
+
+    return np.mean(fg_probs, axis=0), np.mean(ov_probs, axis=0), np.mean(bd_probs, axis=0)
+
 def postprocess_watershed(image_np, fg_mask, bd_mask, ov_mask):
     """
     Sử dụng Marker-controlled Watershed để tách các cụm nhiễm sắc thể dính nhau
@@ -130,20 +178,18 @@ def main():
         augmented = transform(image=img_rgb)
         img_tensor = augmented["image"].unsqueeze(0).to(device)
 
-        # Inference
-        with torch.no_grad():
-            with torch.cuda.amp.autocast():
-                fg_logits, ov_logits, bd_logits = model(img_tensor)
-
-        # Sigmoid -> Xác suất (Probability)
-        fg_prob = torch.sigmoid(fg_logits).squeeze().cpu().numpy()
-        ov_prob = torch.sigmoid(ov_logits).squeeze().cpu().numpy()
-        bd_prob = torch.sigmoid(bd_logits).squeeze().cpu().numpy()
+        # Inference with TTA
+        fg_prob, ov_prob, bd_prob = predict_with_tta(model, img_tensor)
 
         # Áp dụng ngưỡng (Threshold)
         fg_mask = (fg_prob > fg_thresh).astype(np.uint8)
         ov_mask = (ov_prob > ov_thresh).astype(np.uint8)
         bd_mask = (bd_prob > bd_thresh).astype(np.uint8)
+
+        # Làm sạch nhiễu cho mask
+        fg_mask = clean_mask(fg_mask, morph_size=3)
+        ov_mask = clean_mask(ov_mask, morph_size=3)
+        bd_mask = clean_mask(bd_mask, morph_size=3)
 
         # Resize lại đúng kích thước ảnh gốc cho Watershed
         orig_h, orig_w = img_rgb.shape[:2]
