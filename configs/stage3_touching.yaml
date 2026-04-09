@@ -1,0 +1,33 @@
+stage: stage3_sep
+task: touching
+experiment_name: poolformer_touching_v1
+
+training:
+  data_root: "C:\\data\\stage3_separation\\touching"
+  save_dir: "experiments/stage3_sep"
+  epochs: 100
+  warmup_epochs: 5
+  batch_size: 8
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  patience: 15
+  min_delta: 1.0e-4
+  num_workers: 1
+  seed: 42
+  resume: false
+
+model:
+  type: poolformer_touching
+  encoder_name: tu-poolformer_m36
+  pretrained_weights: "D:\\Code\\NCKH\\weights\\poolformer_m36.pth"
+  input_size: 384
+  in_channels: 3
+  classes: 2
+
+loss:
+  lambda_fg: 1.0
+  lambda_marker: 1.5
+  fg_threshold: 0.5
+  marker_threshold: 0.4
+  focal_gamma: 2.0
+  focal_alpha: 0.5

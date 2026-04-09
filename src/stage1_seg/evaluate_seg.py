@@ -83,7 +83,7 @@ def main():
     
     if args.weights and os.path.exists(args.weights):
         print(f"[INFO] Loading Weights: {args.weights}")
-        model.load_state_dict(torch.load(args.weights, map_location=device))
+        model.load_state_dict(torch.load(args.weights, map_location=device), strict=False)
         if exp_dir is None:
              exp_dir = os.path.dirname(args.weights)
     else:
